@@ -10,29 +10,49 @@
 
 //#define _COLOR_DEPTH_SAME_DIM 1
 
+#ifdef _COLOR_DEPTH_SAME_HIGHDEF_DIM
 static const int        COLOR_WIDTH = 1920;
 static const int        COLOR_HEIGHT = 1080;
-#ifdef _COLOR_DEPTH_SAME_DIM
+
 static const int        DEPTH_OUTPUT_WIDTH = 1920;
 static const int        DEPTH_OUTPUT_HEIGHT = 1080;
 #else
+static const int        COLOR_WIDTH = 512;
+static const int        COLOR_HEIGHT = 424;
+
 static const int        DEPTH_OUTPUT_WIDTH = 512;
 static const int        DEPTH_OUTPUT_HEIGHT = 424;
 #endif
 
 static const int        DEPTH_NATIVE_WIDTH = 512;
 static const int        DEPTH_NATIVE_HEIGHT = 424;
+static const int        COLOR_NATIVE_WIDTH = 1920;
+static const int        COLOR_NATIVE_HEIGHT = 1080;
 
 typedef struct
 {
 	int refCount;
 } KinectV2StreamFrameCookie;
 
+
+class CKinectV2DeviceBase : public oni::driver::DeviceBase
+{
+public:
+	virtual HRESULT RequestNewFrame(int nFrameType, int *pFrameIndex, INT64 *ptimestamp, const RGBQUAD **ppColorFrameData, const UINT16 **ppDepthFrameData, int *pPixelWidth, int *pPixelHeight) = 0;
+
+};
+
 class KinectV2Stream : public oni::driver::StreamBase
 {
 public:
+	KinectV2Stream(CKinectV2DeviceBase *pDeviceBase)
+		: oni::driver::StreamBase()
+	{
+		m_pDeviceBase = pDeviceBase;
+	}
 	~KinectV2Stream()
 	{
+		m_pDeviceBase = NULL;
 		stop();
 	}
 
@@ -82,35 +102,6 @@ public:
 		return ONI_STATUS_NOT_IMPLEMENTED;
 	}
 
-	//OniDriverFrame* AcquireFrame()
-	//{
-	//	OniDriverFrame* pFrame = (OniDriverFrame*)xnOSCalloc(1, sizeof(OniDriverFrame));
-	//	if (pFrame == NULL)
-	//	{
-	//		XN_ASSERT(FALSE);
-	//		return NULL;
-	//	}
-
-	//	OniVideoMode mode;
-	//	GetVideoMode( &mode );
-
-	//	int dataSize = mode.resolutionX * mode.resolutionY * GetBytesPerPixel();
-	//	pFrame->frame.data = xnOSMallocAligned(dataSize, XN_DEFAULT_MEM_ALIGN);
-	//	if (pFrame->frame.data == NULL)
-	//	{
-	//		XN_ASSERT(FALSE);
-	//		return NULL;
-	//	}
-
-	//    xnOSMemSet( pFrame->frame.data, 0,  dataSize );
-
-	//	pFrame->pDriverCookie = xnOSMalloc(sizeof(KinectV2StreamFrameCookie));
-	//	((KinectV2StreamFrameCookie*)pFrame->pDriverCookie)->refCount = 1;
-
-	//	pFrame->frame.dataSize = dataSize;
-	//	return pFrame;
-	//}
-
 	virtual void Mainloop() = 0;
 	virtual int GetBytesPerPixel() = 0;
 
@@ -132,22 +123,19 @@ protected:
 
 	XN_THREAD_HANDLE m_threadHandle;
 
+	CKinectV2DeviceBase *m_pDeviceBase;
+
 };
 
 class KinectV2ColorStream : public KinectV2Stream
 {
 public:
-	KinectV2ColorStream(CComPtr<IKinectSensor>& kinect)
-		: KinectV2Stream()
-		, m_pIKinectSensor(kinect)
+	KinectV2ColorStream(CKinectV2DeviceBase *pBaseService)
+		: KinectV2Stream(pBaseService)
 	{
-		configureColorNode();
-
-		m_frameId = 1;
 	}
-
-	OniStatus SetVideoMode(OniVideoMode *pNewVideoMode) 
-	{ 
+	OniStatus SetVideoMode(OniVideoMode *pNewVideoMode)
+	{
 		if (pNewVideoMode != NULL)
 		{
 			if (pNewVideoMode->resolutionX != COLOR_WIDTH ||
@@ -176,9 +164,9 @@ public:
 		return ONI_STATUS_OK;
 	}
 
-	virtual int GetBytesPerPixel() 
-	{ 
-		return sizeof(OniRGB888Pixel); 
+	virtual int GetBytesPerPixel()
+	{
+		return sizeof(OniRGB888Pixel);
 	}
 
 	void Mainloop()
@@ -189,9 +177,8 @@ public:
 		{
 			OniFrame* pFrame = getServices().acquireFrame();
 
-			BuildFrame(pFrame);
-
-			raiseNewFrame(pFrame);
+			if (BuildFrame(pFrame))
+				raiseNewFrame(pFrame);
 
 			getServices().releaseFrame(pFrame);
 		}
@@ -199,172 +186,61 @@ public:
 
 private:
 
-	void configureColorNode()
-	{
-		CComPtr<IColorFrameSource> colorFrameSource;
-
-		auto hr = m_pIKinectSensor->Open();
-		if (FAILED(hr))
-		{
-			std::cerr << "IKinectSensor::Open() failed." << std::endl;
-		}
-
-		hr = m_pIKinectSensor->get_ColorFrameSource(&colorFrameSource);
-		if (FAILED(hr))
-		{
-			std::cerr << "IKinectSensor::get_ColorFrameSource() failed." << std::endl;
-			return;
-		}
-
-		hr = colorFrameSource->OpenReader(&m_pIColorFrameReader);
-		if (FAILED(hr))
-		{
-			std::cerr << "IColorFrameSource::OpenReader() failed." << std::endl;
-			return;
-		}
-	}
-
 	virtual int BuildFrame(OniFrame* pFrame)
 	{
-		if (!m_pIColorFrameReader)
-		{
-			return 0;
-		}
-		CComPtr<IColorFrame> pIColorFrame;
-		HRESULT hr = m_pIColorFrameReader->AcquireLatestFrame(&pIColorFrame);
-		if (FAILED(hr))
-		{
-			return 0;
-		}
+		HRESULT hRes = S_OK;
 
-		ColorImageFormat rawcolorformat = ColorImageFormat_None;
-
-		hr = pIColorFrame->get_RawColorImageFormat(&rawcolorformat);
-		if (FAILED(hr))
-		{
+		if (m_pDeviceBase == NULL)
 			return 0;
-		}
-		CComPtr<IFrameDescription> pIFrameDescription;
+		// ask device to request new frame data, timestamp, frameindex
 
-		hr = pIColorFrame->get_FrameDescription(&pIFrameDescription);
-		if (FAILED(hr))
-		{
-			return 0;
-		}
-
-		pFrame->frameIndex = m_frameId;
+		//pFrame->frameIndex = m_frameId;
+		const RGBQUAD *pColorFrameData = NULL;
 
 		pFrame->videoMode.pixelFormat = ONI_PIXEL_FORMAT_RGB888;
-		pFrame->videoMode.resolutionX = COLOR_WIDTH;
-		pFrame->videoMode.resolutionY = COLOR_HEIGHT;
 		pFrame->videoMode.fps = 30;
+		INT64 iTimeStamp;
 
-		pFrame->width = COLOR_WIDTH;
-		pFrame->height = COLOR_HEIGHT;
+		hRes = m_pDeviceBase->RequestNewFrame(1/*frame type*/, &(pFrame->frameIndex), &(iTimeStamp), &pColorFrameData,
+											  NULL, &(pFrame->width), &(pFrame->height));
+		if (FAILED(hRes) || pColorFrameData == NULL)
+			return 0;
+		pFrame->timestamp = iTimeStamp;
+		pFrame->videoMode.resolutionX = pFrame->width;
+		pFrame->videoMode.resolutionY = pFrame->height;
 
 		OniRGB888Pixel* pixel = (OniRGB888Pixel*)(pFrame->data);
+		const int nPixelCount = pFrame->width * pFrame->height;
 
-		if (rawcolorformat == ColorImageFormat_Bgra)
+		for (int p = 0; p < nPixelCount; p++)
 		{
-			UINT nCapacity = 0;
-			BYTE *pOutBuf = NULL;
-
-			hr = pIColorFrame->AccessRawUnderlyingBuffer(&nCapacity, &pOutBuf);
-			if (FAILED(hr))
-			{
-				return 0;
-			}
-
-			const int nPixelCount = nCapacity / 4;
-			for (int p = 0; p < nPixelCount; p++)
-			{
-				pixel->b = *pOutBuf; pOutBuf++;
-				pixel->g = *pOutBuf; pOutBuf++;
-				pixel->r = *pOutBuf; pOutBuf++;
-				pOutBuf++;
-				pixel++;
-			}
+			pixel->b = pColorFrameData->rgbBlue;
+			pixel->g = pColorFrameData->rgbGreen;
+			pixel->r = pColorFrameData->rgbRed;
+			pColorFrameData++;
+			pixel++;
 		}
-		else if (rawcolorformat == ColorImageFormat_Rgba)
-		{
-			UINT nCapacity = 0;
-			BYTE *pOutBuf = NULL;
-
-			hr = pIColorFrame->AccessRawUnderlyingBuffer(&nCapacity, &pOutBuf);
-			if (FAILED(hr))
-			{
-				return 0;
-			}
-
-			const int nPixelCount = nCapacity / 4;
-			for (int p = 0; p < nPixelCount; p++)
-			{
-				pixel->r = *pOutBuf; pOutBuf++;
-				pixel->g = *pOutBuf; pOutBuf++;
-				pixel->b = *pOutBuf; pOutBuf++;
-				pOutBuf++;
-				pixel++;
-			}
-		}
-		else
-		{
-			std::vector<RGBQUAD> colorRGBX;
-
-			colorRGBX.resize(COLOR_WIDTH * COLOR_HEIGHT);
-
-			hr = pIColorFrame->CopyConvertedFrameDataToArray((UINT)(colorRGBX.size() * sizeof(RGBQUAD)),
-														   reinterpret_cast<BYTE*>(&colorRGBX[0]), ColorImageFormat_Bgra);
-			if (FAILED(hr))
-			{
-				return 0;
-			}
-			const int nPixelCount = COLOR_WIDTH * COLOR_HEIGHT;
-			for (int p = 0; p < nPixelCount; p++)
-			{
-				pixel->b = colorRGBX[p].rgbBlue;
-				pixel->g = colorRGBX[p].rgbGreen;
-				pixel->r = colorRGBX[p].rgbRed;
-				pixel++;
-			}
-		}
-
 
 		pFrame->cropOriginX = pFrame->cropOriginY = 0;
 		pFrame->croppingEnabled = FALSE;
 
 		pFrame->sensorType = ONI_SENSOR_COLOR;
-		pFrame->stride = COLOR_WIDTH * sizeof(OniRGB888Pixel);
-		pFrame->timestamp = m_frameId * 33000;
-
-		++m_frameId;
+		pFrame->stride = pFrame->width * sizeof(OniRGB888Pixel);
 
 		return 1;
 	}
-
-
-	int m_frameId;
-
-
-	CComPtr<IKinectSensor>          m_pIKinectSensor;
-	CComPtr<IColorFrameReader>      m_pIColorFrameReader;
-
 };
 
 
 class KinectV2DepthStream : public KinectV2Stream
 {
 public:
-	KinectV2DepthStream(CComPtr<IKinectSensor>& kinect)
-		: KinectV2Stream()
-		, m_pIKinectSensor(kinect)
+	KinectV2DepthStream(CKinectV2DeviceBase *pBaseService)
+		: KinectV2Stream(pBaseService)
 	{
-		configureDepthNode();
-
-		m_frameId = 1;
 	}
-
 	OniStatus SetVideoMode(OniVideoMode *pNewVideoMode)
-	{ 
+	{
 		if (pNewVideoMode != NULL)
 		{
 			if (pNewVideoMode->resolutionX != DEPTH_OUTPUT_WIDTH ||
@@ -393,9 +269,9 @@ public:
 		return ONI_STATUS_OK;
 	}
 
-	virtual int GetBytesPerPixel() 
-	{ 
-		return sizeof(OniDepthPixel); 
+	virtual int GetBytesPerPixel()
+	{
+		return sizeof(OniDepthPixel);
 	}
 
 	void Mainloop()
@@ -405,192 +281,63 @@ public:
 		while (m_running)
 		{
 			OniFrame* pFrame = getServices().acquireFrame();
-			BuildFrame(pFrame);
-			raiseNewFrame(pFrame);
+			if (BuildFrame(pFrame))
+				raiseNewFrame(pFrame);
 			getServices().releaseFrame(pFrame);
 		}
 	}
 
-	virtual OniStatus convertDepthToColorCoordinates(StreamBase* colorStream, int depthX, int depthY, OniDepthPixel depthZ, int* pColorX, int* pColorY) 
-	{ 
-		CComPtr<ICoordinateMapper> pICoordMapper;
-		OniStatus oRes = ONI_STATUS_OK;
-		HRESULT hr = m_pIKinectSensor->get_CoordinateMapper(&pICoordMapper);
-
-		if (FAILED(hr))
-		{
-			std::cerr << "IKinectSensor::get_CoordinateMapper() failed." << std::endl;
-			return ONI_STATUS_NOT_SUPPORTED;
-		}
-		DepthSpacePoint dp = { (float)depthX, (float)depthY };
-		ColorSpacePoint cp;
-
-		hr = pICoordMapper->MapDepthPointToColorSpace(dp, depthZ, &cp);
-		if (FAILED(hr))
-		{
-			std::cerr << "IKinectSensor::MapDepthPointToColorSpace() failed." << std::endl;
-			return ONI_STATUS_NOT_SUPPORTED;
-		}
-		if (pColorX)
-			*pColorX = (int)cp.X;
-		if (pColorY)
-			*pColorY = (int)cp.Y;
-
-		return ONI_STATUS_OK; 
-	}
 private:
-
-	void configureDepthNode()
-	{
-		CComPtr<IDepthFrameSource> depthFrameSource;
-
-		auto hr = m_pIKinectSensor->get_DepthFrameSource(&depthFrameSource);
-		if (FAILED(hr))
-		{
-			std::cerr << "IKinectSensor::get_DepthFrameSource() failed." << std::endl;
-			return;
-		}
-
-		hr = depthFrameSource->OpenReader(&m_pIDepthFrameReader);
-		if (FAILED(hr))
-		{
-			std::cerr << "IDepthFrameSource::OpenReader() failed." << std::endl;
-			return;
-		}
-	}
-
-
 	virtual int BuildFrame(OniFrame* pFrame)
 	{
-		//update();
-		HRESULT hr = S_OK;
-		CComPtr<IDepthFrame> depthFrame;
-		UINT nNativeBufferSize = 0;
-		UINT16 *pNativeBuffer = NULL;
+		HRESULT hRes = S_OK;
 
-		CComPtr<ICoordinateMapper> ICoordMapper;
-
-		hr = m_pIKinectSensor->get_CoordinateMapper(&ICoordMapper);
-		if (FAILED(hr))
-		{
-			std::cerr << "IKinectSensor::get_DepthFrameSource() failed." << std::endl;
+		if (m_pDeviceBase == NULL)
 			return 0;
-		}
+		// ask device to request new frame data, timestamp, frameindex
 
-		pFrame->frameIndex = m_frameId;
+		//pFrame->frameIndex = m_frameId;
+		const UINT16 *pDepthFrameData = NULL;
+
+		pFrame->videoMode.pixelFormat = ONI_PIXEL_FORMAT_RGB888;
+		pFrame->videoMode.fps = 30;
+		INT64 iTimeStamp;
+
+		hRes = m_pDeviceBase->RequestNewFrame(2/*frame type*/, &(pFrame->frameIndex), &(iTimeStamp), NULL,
+											  &pDepthFrameData, &(pFrame->width), &(pFrame->height));
+
+		if (FAILED(hRes) || pDepthFrameData == NULL)
+			return 0;
+		pFrame->timestamp = iTimeStamp;
 
 		pFrame->videoMode.pixelFormat = ONI_PIXEL_FORMAT_DEPTH_1_MM;
-		pFrame->videoMode.resolutionX = DEPTH_OUTPUT_WIDTH;
-		pFrame->videoMode.resolutionY = DEPTH_OUTPUT_HEIGHT;
 		pFrame->videoMode.fps = 30;
 
-		pFrame->width = DEPTH_OUTPUT_WIDTH;
-		pFrame->height = DEPTH_OUTPUT_HEIGHT;
+		pFrame->videoMode.resolutionX = pFrame->width;
+		pFrame->videoMode.resolutionY = pFrame->height;
 
-		if (!m_pIDepthFrameReader)
-		{
-			return 0;
-		}
-
-
-		hr = m_pIDepthFrameReader->AcquireLatestFrame(&depthFrame);
-		if (FAILED(hr))
-		{
-			return 0;
-		}
-
-		// here, KinectV2 native depth size is different from color, 
-		// it needs to be mapped to use.
-		// for now, we force output depth as the same dimension as color,
-		// then map native depth to this new large depth image.
-		hr = depthFrame->AccessUnderlyingBuffer(&nNativeBufferSize, &pNativeBuffer);
-		if (FAILED(hr))
-		{
-			return 0;
-		}
 		pFrame->cropOriginX = pFrame->cropOriginY = 0;
 		pFrame->croppingEnabled = FALSE;
 
 		pFrame->sensorType = ONI_SENSOR_DEPTH;
-		pFrame->stride = DEPTH_OUTPUT_WIDTH * GetBytesPerPixel();
-		pFrame->timestamp = m_frameId * 33000;
+		pFrame->stride = pFrame->width * GetBytesPerPixel();
 
-#ifdef _COLOR_DEPTH_SAME_DIM
-		m_pOutputDepthBuffer.resize(DEPTH_OUTPUT_WIDTH * DEPTH_OUTPUT_HEIGHT);
-		/*
-		auto count = bufferSize_ * GetBytesPerPixel();
-
-		if ( pFrame->data != 0 && depthBuffer_.size() != 0 && pFrame->dataSize == count ) {
-		fprintf( stderr, "update()%p, %p, %d, %d\n", pFrame->data, &depthBuffer_[0], pFrame->dataSize,  count );
-		xnOSMemCopy( pFrame->data, &depthBuffer_[0],  count );
-		}
-		*/
-		// here, we assume pFrame->data has enough data space, so we do it inplace
-		// first allocate enough storage for color point
-		std::vector<DepthSpacePoint> pColorToDepthInfoOut;
-
-		pColorToDepthInfoOut.resize(COLOR_WIDTH * COLOR_HEIGHT);
-
-		hr = ICoordMapper->MapColorFrameToDepthSpace(nNativeBufferSize, pNativeBuffer, COLOR_WIDTH * COLOR_HEIGHT, &(pColorToDepthInfoOut[0]));
-		if (FAILED(hr))
-		{
-			return 0;
-		}
-
-		// copy everything back to pFrame->data
-		std::vector<DepthSpacePoint>::iterator itColorToDepth;
-		UINT16 *pOutFrame = (UINT16*)(pFrame->data);
-		UINT16 *pSrcDepth = (UINT16*)(pNativeBuffer);
-
-		for (itColorToDepth = pColorToDepthInfoOut.begin(); itColorToDepth != pColorToDepthInfoOut.end(); itColorToDepth++)
-		{
-			if (itColorToDepth->X != -std::numeric_limits<float>::infinity() && itColorToDepth->Y != -std::numeric_limits<float>::infinity())
-			{
-				int depthX = static_cast<int>(itColorToDepth->X + 0.5f);
-				int depthY = static_cast<int>(itColorToDepth->Y + 0.5f);
-
-				if ((depthX >= 0 && depthX < DEPTH_NATIVE_WIDTH) && (depthY >= 0 && depthY < DEPTH_NATIVE_HEIGHT))
-				{
-					*pOutFrame = *(pNativeBuffer + DEPTH_NATIVE_WIDTH * depthY + depthX);
-				}
-
-				pOutFrame++;
-
-			}
-		}
-#else
-		if (pFrame->data != NULL && pNativeBuffer != NULL && pFrame->dataSize >= (int)nNativeBufferSize)
-		{
-			xnOSMemCopy(pFrame->data, pNativeBuffer, nNativeBufferSize);
-		}
-
-#endif
-		++m_frameId;
+		xnOSMemCopy(pFrame->data, pDepthFrameData, pFrame->height * pFrame->stride);
 
 		return 1;
 	}
-
-	int m_frameId;
-
-	CComPtr<IKinectSensor>          m_pIKinectSensor;
-	CComPtr<IDepthFrameReader>      m_pIDepthFrameReader;
-
-	std::vector<UINT16> m_pOutputDepthBuffer;
 };
 
 
-class KinectV2Device : public oni::driver::DeviceBase
+class KinectV2Device : public CKinectV2DeviceBase	//public oni::driver::DeviceBase
 {
 public:
 	KinectV2Device(oni::driver::DriverServices& driverServices, CComPtr<IKinectSensor>& kinect)
 		: m_pIKinectSensor(kinect)
 		, m_driverServices(driverServices)
 	{
-#ifdef _COLOR_DEPTH_SAME_DIM
-		m_ImageRegistrationMode = ONI_IMAGE_REGISTRATION_OFF;
-#else
 		m_ImageRegistrationMode = ONI_IMAGE_REGISTRATION_DEPTH_TO_COLOR;
-#endif
+
 		m_numSensors = 2;
 
 		m_sensors[0].pSupportedVideoModes = m_VideoModeInfo[0];// XN_NEW_ARR(OniVideoMode, 1);
@@ -608,10 +355,19 @@ public:
 		m_sensors[1].pSupportedVideoModes[0].fps = 30;
 		m_sensors[1].pSupportedVideoModes[0].resolutionX = COLOR_WIDTH;
 		m_sensors[1].pSupportedVideoModes[0].resolutionY = COLOR_HEIGHT;
-	}
 
-	virtual OniBool isImageRegistrationModeSupported(OniImageRegistrationMode mode) 
-	{ 
+		m_nActiveFrameType = 0;	// current processing frame type, depth or color
+		m_bFetchNewFrame = true;	// need to get new frame or not?
+		m_nFrameTime = 0;
+		m_nFrameIndex = 0;
+		InitializeCriticalSection(&m_SCFrameRequest);
+	}
+	virtual ~KinectV2Device()
+	{
+		DeleteCriticalSection(&m_SCFrameRequest);
+	}
+	virtual OniBool isImageRegistrationModeSupported(OniImageRegistrationMode mode)
+	{
 		// kinect 2 support depth to color 
 		return (mode == ONI_IMAGE_REGISTRATION_DEPTH_TO_COLOR);
 	}
@@ -632,11 +388,11 @@ public:
 	{
 		if (sensorType == ONI_SENSOR_COLOR)
 		{
-			return XN_NEW(KinectV2ColorStream, m_pIKinectSensor);
+			return XN_NEW(KinectV2ColorStream, this);
 		}
 		else  if (sensorType == ONI_SENSOR_DEPTH)
 		{
-			return XN_NEW(KinectV2DepthStream, m_pIKinectSensor);
+			return XN_NEW(KinectV2DepthStream, this);
 		}
 
 		return NULL;
@@ -648,30 +404,24 @@ public:
 	}
 	virtual OniBool isPropertySupported(int propertyId)
 	{
-#ifdef _COLOR_DEPTH_SAME_DIM
-		if (propertyId == ONI_DEVICE_PROPERTY_DRIVER_VERSION)
-#else
 		if (propertyId == ONI_DEVICE_PROPERTY_DRIVER_VERSION || propertyId == ONI_DEVICE_PROPERTY_IMAGE_REGISTRATION)
-#endif
 			return TRUE;
 		return FALSE;
 	}
-	virtual OniStatus setProperty(int propertyId, const void* data, int dataSize) 
-	{ 
+	virtual OniStatus setProperty(int propertyId, const void* data, int dataSize)
+	{
 		switch (propertyId)
 		{
-#ifndef _COLOR_DEPTH_SAME_DIM
 			case ONI_DEVICE_PROPERTY_IMAGE_REGISTRATION:
 			{
-				m_ImageRegistrationMode = *((OniImageRegistrationMode*)(data));
-				return ONI_STATUS_OK;
+					m_ImageRegistrationMode = *((OniImageRegistrationMode*)(data));
+					return ONI_STATUS_OK;
 			}
 			break;
-#endif
 			default:
-				break;
+			break;
 		}
-		return ONI_STATUS_NOT_IMPLEMENTED; 
+		return ONI_STATUS_NOT_IMPLEMENTED;
 	}
 	OniStatus  getProperty(int propertyId, void* data, int* pDataSize)
 	{
@@ -693,13 +443,13 @@ public:
 				}
 			}
 			break;
-#ifndef _COLOR_DEPTH_SAME_DIM
+
 			case ONI_DEVICE_PROPERTY_IMAGE_REGISTRATION:
 			{
-			   if (*pDataSize == sizeof(OniImageRegistrationMode))
+				if (*pDataSize == sizeof(OniImageRegistrationMode))
 				{
-				   OniImageRegistrationMode* pMode = (OniImageRegistrationMode*)data;
-				   *pMode = m_ImageRegistrationMode;
+					OniImageRegistrationMode* pMode = (OniImageRegistrationMode*)data;
+					*pMode = m_ImageRegistrationMode;
 				}
 				else
 				{
@@ -707,27 +457,255 @@ public:
 					rc = ONI_STATUS_BAD_PARAMETER;
 				}
 			}
-				break;
-#endif
+			break;
+
 			default:
 			{
-				m_driverServices.errorLoggerAppend("Unknown property: %d\n", propertyId);
-				rc = ONI_STATUS_NOT_SUPPORTED;
+					   m_driverServices.errorLoggerAppend("Unknown property: %d\n", propertyId);
+					   rc = ONI_STATUS_NOT_SUPPORTED;
 			}
 		}
 		return rc;
 	}
+	public:
+		virtual HRESULT RequestNewFrame(int nFrameType,  int *pFrameIndex, INT64 *ptimestamp, 
+										const RGBQUAD **ppColorFrameData, const UINT16 **ppDepthFrameData,
+										int *pPixelWidth, int *pPixelHeight)
+		{
+			HRESULT hRes = S_OK;
+			EnterCriticalSection(&m_SCFrameRequest);
+
+			hRes = _RequestFrameType(nFrameType);
+			if (FAILED(hRes))
+				goto err_out;
+
+			if (pFrameIndex)
+				*pFrameIndex = m_nFrameIndex;
+
+			if (ptimestamp)
+				*ptimestamp = m_nFrameTime;
+
+			if (ppColorFrameData && m_colorRGBX.size())
+				*ppColorFrameData = &(m_colorRGBX[0]);
+			if (ppDepthFrameData && m_pOutputDepthBuffer.size())
+				*ppDepthFrameData = &(m_pOutputDepthBuffer[0]);
+			if (pPixelWidth)
+				*pPixelWidth = DEPTH_OUTPUT_WIDTH;
+			if (pPixelHeight)
+				*pPixelHeight = DEPTH_OUTPUT_HEIGHT;
+		err_out:
+			LeaveCriticalSection(&m_SCFrameRequest);
+			
+			return hRes;
+		}
+protected:
+	// nType: 0: unknown, 1: color, 2: depth
+	HRESULT _RequestFrameType(int nType)
+	{
+		HRESULT hRes = S_OK;
+
+		if (nType == 0)
+			return E_FAIL;
+
+		if (m_nActiveFrameType == 0)
+		{
+			// initial state, no frame is fetched
+			m_bFetchNewFrame = true;
+		}
+		else if (m_nActiveFrameType != nType)
+		{
+			// different type, use existing buffer, 
+			m_bFetchNewFrame = false;
+			
+		}
+		else
+		{
+			// active frame type is the same as previous request, that means,
+			// data at the same timestamp is not requested by all data stream,
+			// so, we just ignore all those 
+			m_bFetchNewFrame = true;
+		}
+		
+
+		if (m_bFetchNewFrame)
+		{
+			hRes = _FetchNewFrameData();
+			if (!FAILED(hRes))
+			{
+				m_bFetchNewFrame = false;
+				m_nActiveFrameType = nType;
+			}
+		}
+
+		return hRes;
+	}
+	HRESULT _FetchNewFrameData(void)
+	{
+		// here, we get multi-frame source at once
+		// color frame is the same size as depth
+		CComPtr<IDepthFrame> pDepthFrame = NULL;
+		CComPtr<IColorFrame> pColorFrame = NULL;
+		CComPtr<IMultiSourceFrame> pMultiSourceFrame = NULL;
+		HRESULT hRes = S_OK;
+
+		if (m_pIKinectSensor)
+		{
+			// Initialize the Kinect and get coordinate mapper and the frame reader
+			if (NULL == m_pICoorMapper)
+			{
+				hRes = m_pIKinectSensor->get_CoordinateMapper(&m_pICoorMapper);
+				if (FAILED(hRes))
+					return hRes;
+			}
+
+			hRes = m_pIKinectSensor->Open();
+
+			if (SUCCEEDED(hRes) && m_pMultiSourceFrameReader == NULL)
+			{
+				hRes = m_pIKinectSensor->OpenMultiSourceFrameReader(
+					FrameSourceTypes::FrameSourceTypes_Depth | 
+					FrameSourceTypes::FrameSourceTypes_Color /*| FrameSourceTypes::FrameSourceTypes_BodyIndex*/,
+					&m_pMultiSourceFrameReader);
+			}
+		}
+
+		if (!m_pIKinectSensor || FAILED(hRes) || !m_pMultiSourceFrameReader)
+		{
+			//SetStatusMessage(L"No ready Kinect found!", 10000, true);
+			hRes = E_FAIL;
+		}
+		// here, we have color-frame and depth data, copy it to internal buffer
+		hRes = m_pMultiSourceFrameReader->AcquireLatestFrame(&pMultiSourceFrame);
+
+		if (SUCCEEDED(hRes))
+		{
+			CComPtr<IDepthFrameReference> pDepthFrameReference = NULL;
+
+			hRes = pMultiSourceFrame->get_DepthFrameReference(&pDepthFrameReference);
+			if (SUCCEEDED(hRes))
+			{
+				hRes = pDepthFrameReference->AcquireFrame(&pDepthFrame);
+			}
+
+			//SafeRelease(pDepthFrameReference);
+		}
+
+		if (SUCCEEDED(hRes))
+		{
+			CComPtr<IColorFrameReference> pColorFrameReference = NULL;
+
+			hRes = pMultiSourceFrame->get_ColorFrameReference(&pColorFrameReference);
+			if (SUCCEEDED(hRes))
+			{
+				hRes = pColorFrameReference->AcquireFrame(&pColorFrame);
+			}
+
+			//SafeRelease(pColorFrameReference);
+		}
+		if (SUCCEEDED(hRes))
+			hRes = pDepthFrame->get_RelativeTime(&m_nFrameTime);
+
+		if (SUCCEEDED(hRes))
+		{
+			UINT nDepthBufferSize = 0;
+			UINT16 *pDepthBuffer = NULL;
+			ColorImageFormat imageFormat = ColorImageFormat_None;
+			UINT nColorBufferSize = 0;
+			RGBQUAD *pColorBuffer = NULL;
+			std::vector<RGBQUAD> pConvertedBuffer;
+
+			hRes = pDepthFrame->AccessUnderlyingBuffer(&nDepthBufferSize, &pDepthBuffer);
+			if (!FAILED(hRes))
+			{
+				m_pOutputDepthBuffer.resize(nDepthBufferSize);
+
+				xnOSMemCopy(&(m_pOutputDepthBuffer[0]), pDepthBuffer, nDepthBufferSize * sizeof(UINT16));
+
+				if (SUCCEEDED(hRes))
+				{
+					hRes = pColorFrame->get_RawColorImageFormat(&imageFormat);
+				}
+
+				if (SUCCEEDED(hRes))
+				{
+					if (imageFormat == ColorImageFormat_Bgra)
+					{
+						hRes = pColorFrame->AccessRawUnderlyingBuffer(&nColorBufferSize, reinterpret_cast<BYTE**>(&pColorBuffer));
+					}
+					else 
+					{
+						pConvertedBuffer.resize(COLOR_NATIVE_WIDTH * COLOR_NATIVE_HEIGHT);
+
+						pColorBuffer = &(pConvertedBuffer[0]);
+						nColorBufferSize = COLOR_NATIVE_WIDTH * COLOR_NATIVE_HEIGHT * sizeof(RGBQUAD);
+
+						hRes = pColorFrame->CopyConvertedFrameDataToArray(nColorBufferSize, reinterpret_cast<BYTE*>(pColorBuffer), ColorImageFormat_Bgra);
+					}
+					{
+						if (!FAILED(hRes))
+						{
+							m_colorRGBX.resize(DEPTH_OUTPUT_HEIGHT * DEPTH_OUTPUT_WIDTH);
+							std::vector<ColorSpacePoint> pColorPt;
+							pColorPt.resize(DEPTH_OUTPUT_HEIGHT * DEPTH_OUTPUT_WIDTH);
+							hRes = m_pICoorMapper->MapDepthFrameToColorSpace(DEPTH_OUTPUT_WIDTH * DEPTH_OUTPUT_HEIGHT,
+																			(const UINT16 *)pDepthBuffer,
+																			DEPTH_OUTPUT_WIDTH * DEPTH_OUTPUT_HEIGHT,
+																			&(pColorPt[0]));
+
+							std::vector<RGBQUAD>::iterator itRGBOut = m_colorRGBX.begin();
+							std::vector<ColorSpacePoint>::iterator itColorPt = pColorPt.begin();
+							RGBQUAD *pSourceRGB = (RGBQUAD*)pColorBuffer;
+							
+							memset(pSourceRGB, 0, DEPTH_OUTPUT_HEIGHT * DEPTH_OUTPUT_WIDTH * sizeof(RGBQUAD));
+							for (; itColorPt != pColorPt.end(); itRGBOut++, itColorPt++)
+							{
+								if (itColorPt->X != -std::numeric_limits<float>::infinity() && itColorPt->Y != -std::numeric_limits<float>::infinity())
+								{
+									int nCX = (int)(itColorPt->X + 0.5f);
+									int nCY = (int)(itColorPt->Y + 0.5f);
+
+									if (nCX >= 0 && nCX < COLOR_NATIVE_WIDTH && nCY >= 0 && nCY < COLOR_NATIVE_HEIGHT)
+									{
+										*itRGBOut = pSourceRGB[COLOR_NATIVE_WIDTH * nCY + nCX];
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		m_nFrameIndex++;
+		err_out:
+		return hRes;
+	}
 private:
 	KinectV2Device(const KinectV2Device&);
 	void operator=(const KinectV2Device&);
-
+	
 	CComPtr<IKinectSensor>	m_pIKinectSensor;
+	CComPtr<IMultiSourceFrameReader> m_pMultiSourceFrameReader;
+	CComPtr<ICoordinateMapper> m_pICoorMapper;
+
 	OniImageRegistrationMode m_ImageRegistrationMode;
 	OniDeviceInfo* m_pInfo;
 	int m_numSensors;
 	OniSensorInfo m_sensors[10];
 	OniVideoMode m_VideoModeInfo[2][2];
 	oni::driver::DriverServices& m_driverServices;
+
+	// here, we store the latest frame information
+	int m_nActiveFrameType;	// current processing frame type, depth or color
+	bool m_bFetchNewFrame;	// need to get new frame or not?
+	INT64 m_nFrameTime;
+	UINT m_nFrameIndex;
+	CRITICAL_SECTION m_SCFrameRequest;
+
+	// whenever a frame request arrives, all frame data are retrieved and stored.
+	// if another frame request arrives, and this is the same frame type as m_nActiveFrameType,
+	// then new frame data is retrieved.
+	std::vector<UINT16> m_pOutputDepthBuffer;
+	std::vector<RGBQUAD> m_colorRGBX;
 };
 
 class Kinect2Driver : public oni::driver::DriverBase
