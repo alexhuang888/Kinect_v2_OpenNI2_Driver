@@ -299,7 +299,7 @@ private:
 		//pFrame->frameIndex = m_frameId;
 		const UINT16 *pDepthFrameData = NULL;
 
-		pFrame->videoMode.pixelFormat = ONI_PIXEL_FORMAT_RGB888;
+		pFrame->videoMode.pixelFormat = ONI_PIXEL_FORMAT_DEPTH_1_MM;
 		pFrame->videoMode.fps = 30;
 		INT64 iTimeStamp;
 
@@ -654,9 +654,10 @@ protected:
 
 							std::vector<RGBQUAD>::iterator itRGBOut = m_colorRGBX.begin();
 							std::vector<ColorSpacePoint>::iterator itColorPt = pColorPt.begin();
-							RGBQUAD *pSourceRGB = (RGBQUAD*)pColorBuffer;
+							const RGBQUAD *pSourceRGB = (const RGBQUAD*)pColorBuffer;
 							
-							memset(pSourceRGB, 0, DEPTH_OUTPUT_HEIGHT * DEPTH_OUTPUT_WIDTH * sizeof(RGBQUAD));
+							memset(&(m_colorRGBX[0]), 0, DEPTH_OUTPUT_HEIGHT * DEPTH_OUTPUT_WIDTH * sizeof(RGBQUAD));
+							
 							for (; itColorPt != pColorPt.end(); itRGBOut++, itColorPt++)
 							{
 								if (itColorPt->X != -std::numeric_limits<float>::infinity() && itColorPt->Y != -std::numeric_limits<float>::infinity())
@@ -670,13 +671,14 @@ protected:
 									}
 								}
 							}
+							
 						}
 					}
 				}
 			}
 		}
 		m_nFrameIndex++;
-		err_out:
+//		err_out:
 		return hRes;
 	}
 private:
